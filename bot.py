@@ -312,7 +312,7 @@ async def clearwarns(interaction: discord.Interaction, member: discord.Member):
 # --- SEND EMBED ---
 class EmbedModal(discord.ui.Modal, title="Editor de Embed"):
     title_input = discord.ui.TextInput(label="Título", placeholder="Escribe el título del embed...", max_length=256, required=False)
-    desc_input = discord.ui.TextInput(label="Descripción", placeholder="Escribe la descripción...", style=discord.TextStyle.paragraph, max_length=4096, required=False)
+    desc_input = discord.ui.TextInput(label="Descripción", placeholder="Escribe la descripción...", style=discord.TextStyle.paragraph, max_length=4000, required=False)
     color_input = discord.ui.TextInput(label="Color (Hex)", placeholder="Ejemplo: #5865F2", max_length=10, required=False, default="#5865F2")
     footer_input = discord.ui.TextInput(label="Pie de página", placeholder="Texto del footer...", max_length=2048, required=False)
     image_input = discord.ui.TextInput(label="URL de Imagen", placeholder="https://ejemplo.com/imagen.png", required=False)
