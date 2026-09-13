@@ -346,47 +346,57 @@ class EmbedModal(discord.ui.Modal, title="Editor de Embed"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Validar URL de imagen
-        image_url = (self.image_input.value or "").strip()
-        invalid_image_warning = None
-        if image_url and not is_valid_url(image_url):
-            invalid_image_warning = image_url
-            image_url = None
+        # Defer inmediato para evitar timeout
+        await interaction.response.defer(ephemeral=True)
 
-        # Procesar color
-        color_val = discord.Color.blue()
-        if self.color_input.value:
+        try:
+            # Validar URL de imagen
+            image_url = (self.image_input.value or "").strip()
+            invalid_image_warning = None
+            if image_url and not is_valid_url(image_url):
+                invalid_image_warning = image_url
+                image_url = None
+
+            # Procesar color
+            color_val = discord.Color.blue()
+            if self.color_input.value:
+                try:
+                    if self.color_input.value.startswith("#"):
+                        color_val = discord.Color(int(self.color_input.value[1:], 16))
+                    else:
+                        color_val = getattr(discord.Color, self.color_input.value.lower(), discord.Color.blue)()
+                except Exception:
+                    pass
+
+            embed = discord.Embed(
+                title=self.title_input.value or None,
+                description=self.desc_input.value or None,
+                color=color_val,
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            if self.footer_input.value:
+                embed.set_footer(text=self.footer_input.value)
+            if image_url:
+                embed.set_image(url=image_url)
+
+            view = EmbedPreviewView(embed)
+
+            content = "**Preview del Embed** (Solo tú lo ves):"
+            if invalid_image_warning:
+                content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
+
+            await interaction.followup.send(
+                content=content,
+                embed=embed,
+                view=view,
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"❌ Error en EmbedModal: {e}")
             try:
-                if self.color_input.value.startswith("#"):
-                    color_val = discord.Color(int(self.color_input.value[1:], 16))
-                else:
-                    color_val = getattr(discord.Color, self.color_input.value.lower(), discord.Color.blue)()
+                await interaction.followup.send(f"❌ Error al crear el embed: {e}", ephemeral=True)
             except Exception:
                 pass
-
-        embed = discord.Embed(
-            title=self.title_input.value or None,
-            description=self.desc_input.value or None,
-            color=color_val,
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        if self.footer_input.value:
-            embed.set_footer(text=self.footer_input.value)
-        if image_url:
-            embed.set_image(url=image_url)
-
-        view = EmbedPreviewView(embed)
-
-        content = "**Preview del Embed** (Solo tú lo ves):"
-        if invalid_image_warning:
-            content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
-
-        await interaction.response.send_message(
-            content=content,
-            embed=embed,
-            view=view,
-            ephemeral=True
-        )
 
 
 class EmbedPreviewView(discord.ui.View):
@@ -396,11 +406,16 @@ class EmbedPreviewView(discord.ui.View):
 
     @discord.ui.button(label="Enviar", style=discord.ButtonStyle.green, emoji="✅")
     async def send_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.channel.send(embed=self.embed)
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content="✅ **Embed enviado al canal.**", view=self)
-        self.stop()
+        try:
+            await interaction.channel.send(embed=self.embed)
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(content="✅ **Embed enviado al canal.**", view=self)
+            self.stop()
+        except Exception as e:
+            print(f"❌ Error enviando embed: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(label="Seguir Editando", style=discord.ButtonStyle.blurple, emoji="✏️")
     async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -457,62 +472,72 @@ class GiveawayModal(discord.ui.Modal, title="Crear Sorteo"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Validar duración
+        # Defer inmediato para evitar timeout
+        await interaction.response.defer(ephemeral=True)
+
         try:
-            minutos = int(self.duracion.value)
-            if minutos < 1 or minutos > 10080:
-                raise ValueError
-        except ValueError:
-            await interaction.response.send_message(
-                "❌ La duración debe ser un número entre 1 y 10080 minutos (7 días).",
+            # Validar duración
+            try:
+                minutos = int(self.duracion.value)
+                if minutos < 1 or minutos > 10080:
+                    raise ValueError
+            except ValueError:
+                await interaction.followup.send(
+                    "❌ La duración debe ser un número entre 1 y 10080 minutos (7 días).",
+                    ephemeral=True
+                )
+                return
+
+            # Validar URL de imagen
+            image_url = (self.imagen.value or "").strip()
+            invalid_image_warning = None
+            if image_url and not is_valid_url(image_url):
+                invalid_image_warning = image_url
+                image_url = None
+
+            # Procesar color
+            color_val = discord.Color.blurple()
+            if self.color.value:
+                try:
+                    if self.color.value.startswith("#"):
+                        color_val = discord.Color(int(self.color.value[1:], 16))
+                    else:
+                        color_val = getattr(discord.Color, self.color.value.lower(), discord.Color.blurple)()
+                except Exception:
+                    pass
+
+            end_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutos)
+
+            giveaway = Giveaway(
+                title=self.titulo.value,
+                description=self.descripcion.value or "¡Participa para ganar!",
+                prize=self.premio.value,
+                host_id=interaction.user.id,
+                channel_id=interaction.channel.id,
+                end_time=end_time,
+                color=color_val,
+                image=image_url
+            )
+
+            embed = build_giveaway_embed(giveaway, interaction.user)
+            view = GiveawayPreviewView(giveaway, embed)
+
+            content = "👀 **Preview del Sorteo** (solo tú lo ves). Pulsa **Publicar** para enviarlo al canal."
+            if invalid_image_warning:
+                content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
+
+            await interaction.followup.send(
+                content=content,
+                embed=embed,
+                view=view,
                 ephemeral=True
             )
-            return
-
-        # Validar URL de imagen
-        image_url = (self.imagen.value or "").strip()
-        invalid_image_warning = None
-        if image_url and not is_valid_url(image_url):
-            invalid_image_warning = image_url
-            image_url = None
-
-        # Procesar color
-        color_val = discord.Color.blurple()
-        if self.color.value:
+        except Exception as e:
+            print(f"❌ Error en GiveawayModal: {e}")
             try:
-                if self.color.value.startswith("#"):
-                    color_val = discord.Color(int(self.color.value[1:], 16))
-                else:
-                    color_val = getattr(discord.Color, self.color.value.lower(), discord.Color.blurple)()
+                await interaction.followup.send(f"❌ Error al crear el sorteo: {e}", ephemeral=True)
             except Exception:
                 pass
-
-        end_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutos)
-
-        giveaway = Giveaway(
-            title=self.titulo.value,
-            description=self.descripcion.value or "¡Participa para ganar!",
-            prize=self.premio.value,
-            host_id=interaction.user.id,
-            channel_id=interaction.channel.id,
-            end_time=end_time,
-            color=color_val,
-            image=image_url
-        )
-
-        embed = build_giveaway_embed(giveaway, interaction.user)
-        view = GiveawayPreviewView(giveaway, embed)
-
-        content = "👀 **Preview del Sorteo** (solo tú lo ves). Pulsa **Publicar** para enviarlo al canal."
-        if invalid_image_warning:
-            content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
-
-        await interaction.response.send_message(
-            content=content,
-            embed=embed,
-            view=view,
-            ephemeral=True
-        )
 
 
 def build_giveaway_embed(giveaway: Giveaway, host: discord.abc.User) -> discord.Embed:
@@ -541,25 +566,30 @@ class GiveawayPreviewView(discord.ui.View):
 
     @discord.ui.button(label="Publicar", style=discord.ButtonStyle.green, emoji="📢")
     async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            content="✅ Publicando sorteo...",
-            embed=self.embed,
-            view=self
-        )
+        try:
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                content="✅ Publicando sorteo...",
+                embed=self.embed,
+                view=self
+            )
 
-        view = GiveawayJoinView()
-        message = await interaction.channel.send(embed=self.embed, view=view)
+            view = GiveawayJoinView()
+            message = await interaction.channel.send(embed=self.embed, view=view)
 
-        self.giveaway.message_id = message.id
-        bot.giveaways[message.id] = self.giveaway
+            self.giveaway.message_id = message.id
+            bot.giveaways[message.id] = self.giveaway
 
-        await interaction.followup.send(
-            f"🎉 Sorteo publicado correctamente en {interaction.channel.mention}. Termina <t:{int(self.giveaway.end_time.timestamp())}:R>.",
-            ephemeral=True
-        )
-        self.stop()
+            await interaction.followup.send(
+                f"🎉 Sorteo publicado correctamente en {interaction.channel.mention}. Termina <t:{int(self.giveaway.end_time.timestamp())}:R>.",
+                ephemeral=True
+            )
+            self.stop()
+        except Exception as e:
+            print(f"❌ Error publicando sorteo: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
     @discord.ui.button(label="Editar", style=discord.ButtonStyle.blurple, emoji="✏️")
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -588,46 +618,51 @@ class GiveawayJoinView(discord.ui.View):
         custom_id="giveaway_join_button"
     )
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        message_id = interaction.message.id
-        giveaway = bot.giveaways.get(message_id)
-
-        if giveaway is None:
-            await interaction.response.send_message(
-                "❌ Este sorteo ya no está activo o no se pudo encontrar.",
-                ephemeral=True
-            )
-            return
-
-        if giveaway.finished:
-            await interaction.response.send_message(
-                "❌ Este sorteo ya ha finalizado.",
-                ephemeral=True
-            )
-            return
-
-        if interaction.user.id in giveaway.participants:
-            await interaction.response.send_message(
-                "⚠️ Ya estás participando en este sorteo. Solo puedes hacerlo una vez.",
-                ephemeral=True
-            )
-            return
-
-        giveaway.participants.add(interaction.user.id)
-
         try:
-            embed = interaction.message.embeds[0]
-            for i, field in enumerate(embed.fields):
-                if field.name == "👥 Participantes":
-                    embed.set_field_at(i, name="👥 Participantes", value=f"`{len(giveaway.participants)}`", inline=True)
-                    break
-            await interaction.message.edit(embed=embed)
-        except Exception as e:
-            print(f"⚠️ No se pudo actualizar el contador: {e}")
+            message_id = interaction.message.id
+            giveaway = bot.giveaways.get(message_id)
 
-        await interaction.response.send_message(
-            f"✅ ¡Estás participando en el sorteo **{giveaway.title}**! Mucha suerte 🍀",
-            ephemeral=True
-        )
+            if giveaway is None:
+                await interaction.response.send_message(
+                    "❌ Este sorteo ya no está activo o no se pudo encontrar.",
+                    ephemeral=True
+                )
+                return
+
+            if giveaway.finished:
+                await interaction.response.send_message(
+                    "❌ Este sorteo ya ha finalizado.",
+                    ephemeral=True
+                )
+                return
+
+            if interaction.user.id in giveaway.participants:
+                await interaction.response.send_message(
+                    "⚠️ Ya estás participando en este sorteo. Solo puedes hacerlo una vez.",
+                    ephemeral=True
+                )
+                return
+
+            giveaway.participants.add(interaction.user.id)
+
+            try:
+                embed = interaction.message.embeds[0]
+                for i, field in enumerate(embed.fields):
+                    if field.name == "👥 Participantes":
+                        embed.set_field_at(i, name="👥 Participantes", value=f"`{len(giveaway.participants)}`", inline=True)
+                        break
+                await interaction.message.edit(embed=embed)
+            except Exception as e:
+                print(f"⚠️ No se pudo actualizar el contador: {e}")
+
+            await interaction.response.send_message(
+                f"✅ ¡Estás participando en el sorteo **{giveaway.title}**! Mucha suerte 🍀",
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"❌ Error en botón participar: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="giveaway", description="Crea un sorteo con UI interactiva")
@@ -657,7 +692,10 @@ async def setup_automod_cmd(interaction: discord.Interaction):
 @giveaway.error
 async def permission_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ No tienes permisos para usar este comando.", ephemeral=True)
 
 
 if __name__ == "__main__":
