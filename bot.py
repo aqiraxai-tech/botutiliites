@@ -5,6 +5,7 @@ import datetime
 import os
 import random
 import asyncio
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,13 +18,11 @@ intents.message_content = True
 class AqiraxBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
-        # Almacén de sorteos activos: {message_id: Giveaway}
         self.giveaways = {}
 
     async def setup_hook(self):
         await self.tree.sync()
         print("✅ Comandos de barra sincronizados.")
-        # Iniciar el loop que revisa sorteos finalizados
         self.check_giveaways.start()
 
     async def on_ready(self):
@@ -40,13 +39,6 @@ class AqiraxBot(commands.Bot):
         for guild in self.guilds:
             await self.setup_automod(guild)
 
-        # Reanudar sorteos activos desde el canal (si el bot se reinició)
-        await self.recover_giveaways()
-
-    async def recover_giveaways(self):
-        """Intenta recuperar sorteos activos desde los mensajes fijados."""
-        for guild in self.giveaways.values():
-            pass  # Reservado para persistencia futura con DB
         print(f"ℹ️ Sorteos en memoria: {len(self.giveaways)}")
 
     async def setup_automod(self, guild: discord.Guild):
@@ -83,7 +75,6 @@ class AqiraxBot(commands.Bot):
         except Exception as e:
             print(f"❌ Error creando AutoMod en {guild.name}: {e}")
 
-    # --- LOOP QUE REVISA SORTEOS TERMINADOS CADA 10 SEGUNDOS ---
     @tasks.loop(seconds=10)
     async def check_giveaways(self):
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -116,10 +107,8 @@ class AqiraxBot(commands.Bot):
             self.giveaways.pop(message_id, None)
             return
 
-        # Elegir ganador
         participants = list(giveaway.participants)
         if not participants:
-            # Sin participantes
             embed = message.embeds[0] if message.embeds else discord.Embed(title=giveaway.title)
             embed.color = discord.Color.red()
             embed.add_field(
@@ -140,11 +129,9 @@ class AqiraxBot(commands.Bot):
             winner = await self.fetch_user(winner_id)
             winner_mention = winner.mention
             winner_name = str(winner)
-            winner_avatar = winner.display_avatar.url
         except Exception:
             winner_mention = f"<@{winner_id}>"
             winner_name = f"Usuario {winner_id}"
-            winner_avatar = None
 
         embed = message.embeds[0] if message.embeds else discord.Embed(title=giveaway.title)
         embed.color = discord.Color.gold()
@@ -173,7 +160,7 @@ bot = AqiraxBot()
 
 # --- ESTRUCTURA DE DATOS DEL GIVEAWAY ---
 class Giveaway:
-    def __init__(self, title, description, prize, host_id, channel_id, end_time, color=discord.Color.blurple(), thumbnail=None, image=None):
+    def __init__(self, title, description, prize, host_id, channel_id, end_time, color=discord.Color.blurple(), image=None):
         self.title = title
         self.description = description
         self.prize = prize
@@ -181,14 +168,26 @@ class Giveaway:
         self.channel_id = channel_id
         self.end_time = end_time
         self.color = color
-        self.thumbnail = thumbnail
         self.image = image
-        self.participants = set()  # IDs únicos
+        self.participants = set()
         self.finished = False
         self.message_id = None
 
 
-# --- COMANDOS BÁSICOS (los mismos que antes) ---
+# --- UTILIDAD: VALIDAR URL ---
+def is_valid_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url.strip())
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+# ============================================================
+#                       COMANDOS
+# ============================================================
 
 @bot.tree.command(name="help", description="Muestra los comandos disponibles")
 async def help_command(interaction: discord.Interaction):
@@ -198,7 +197,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="/kick", value="Expulsa a un usuario.", inline=False)
     embed.add_field(name="/user-info", value="Muestra información de un usuario.", inline=False)
     embed.add_field(name="/server-info", value="Muestra información del servidor.", inline=False)
-    embed.add_field(name="/channel-info", value="Muestra información del canal.", inline=False)
+    embed.add_field(name="/channel-info", value="Muestra información de un canal.", inline=False)
     embed.add_field(name="/banner", value="Muestra el banner de un usuario.", inline=False)
     embed.add_field(name="/clearwarns", value="Limpia las advertencias de un usuario.", inline=False)
     embed.add_field(name="/send-embed", value="Abre el editor para crear un embed personalizado.", inline=False)
@@ -309,15 +308,52 @@ async def clearwarns(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message(f"{member.mention} no tiene advertencias registradas.", ephemeral=True)
 
 
-# --- SEND EMBED ---
+# ============================================================
+#                        SEND EMBED
+# ============================================================
+
 class EmbedModal(discord.ui.Modal, title="Editor de Embed"):
-    title_input = discord.ui.TextInput(label="Título", placeholder="Escribe el título del embed...", max_length=256, required=False)
-    desc_input = discord.ui.TextInput(label="Descripción", placeholder="Escribe la descripción...", style=discord.TextStyle.paragraph, max_length=4000, required=False)
-    color_input = discord.ui.TextInput(label="Color (Hex)", placeholder="Ejemplo: #5865F2", max_length=10, required=False, default="#5865F2")
-    footer_input = discord.ui.TextInput(label="Pie de página", placeholder="Texto del footer...", max_length=2048, required=False)
-    image_input = discord.ui.TextInput(label="URL de Imagen", placeholder="https://ejemplo.com/imagen.png", required=False)
+    title_input = discord.ui.TextInput(
+        label="Título",
+        placeholder="Escribe el título del embed...",
+        max_length=256,
+        required=False
+    )
+    desc_input = discord.ui.TextInput(
+        label="Descripción",
+        placeholder="Escribe la descripción...",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+        required=False
+    )
+    color_input = discord.ui.TextInput(
+        label="Color (Hex)",
+        placeholder="Ejemplo: #5865F2",
+        max_length=10,
+        required=False,
+        default="#5865F2"
+    )
+    footer_input = discord.ui.TextInput(
+        label="Pie de página",
+        placeholder="Texto del footer...",
+        max_length=2048,
+        required=False
+    )
+    image_input = discord.ui.TextInput(
+        label="URL de Imagen",
+        placeholder="https://ejemplo.com/imagen.png",
+        required=False
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Validar URL de imagen
+        image_url = (self.image_input.value or "").strip()
+        invalid_image_warning = None
+        if image_url and not is_valid_url(image_url):
+            invalid_image_warning = image_url
+            image_url = None
+
+        # Procesar color
         color_val = discord.Color.blue()
         if self.color_input.value:
             try:
@@ -336,11 +372,21 @@ class EmbedModal(discord.ui.Modal, title="Editor de Embed"):
         )
         if self.footer_input.value:
             embed.set_footer(text=self.footer_input.value)
-        if self.image_input.value:
-            embed.set_image(url=self.image_input.value)
+        if image_url:
+            embed.set_image(url=image_url)
 
         view = EmbedPreviewView(embed)
-        await interaction.response.send_message(content="**Preview del Embed** (Solo tú lo ves):", embed=embed, view=view, ephemeral=True)
+
+        content = "**Preview del Embed** (Solo tú lo ves):"
+        if invalid_image_warning:
+            content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
+
+        await interaction.response.send_message(
+            content=content,
+            embed=embed,
+            view=view,
+            ephemeral=True
+        )
 
 
 class EmbedPreviewView(discord.ui.View):
@@ -414,7 +460,7 @@ class GiveawayModal(discord.ui.Modal, title="Crear Sorteo"):
         # Validar duración
         try:
             minutos = int(self.duracion.value)
-            if minutos < 1 or minutos > 10080:  # máximo 7 días
+            if minutos < 1 or minutos > 10080:
                 raise ValueError
         except ValueError:
             await interaction.response.send_message(
@@ -422,6 +468,13 @@ class GiveawayModal(discord.ui.Modal, title="Crear Sorteo"):
                 ephemeral=True
             )
             return
+
+        # Validar URL de imagen
+        image_url = (self.imagen.value or "").strip()
+        invalid_image_warning = None
+        if image_url and not is_valid_url(image_url):
+            invalid_image_warning = image_url
+            image_url = None
 
         # Procesar color
         color_val = discord.Color.blurple()
@@ -444,15 +497,18 @@ class GiveawayModal(discord.ui.Modal, title="Crear Sorteo"):
             channel_id=interaction.channel.id,
             end_time=end_time,
             color=color_val,
-            image=self.imagen.value or None
+            image=image_url
         )
 
-        # Construir embed de preview
         embed = build_giveaway_embed(giveaway, interaction.user)
         view = GiveawayPreviewView(giveaway, embed)
 
+        content = "👀 **Preview del Sorteo** (solo tú lo ves). Pulsa **Publicar** para enviarlo al canal."
+        if invalid_image_warning:
+            content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
+
         await interaction.response.send_message(
-            content="👀 **Preview del Sorteo** (solo tú lo ves). Pulsa **Publicar** para enviarlo al canal.",
+            content=content,
             embed=embed,
             view=view,
             ephemeral=True
@@ -460,7 +516,6 @@ class GiveawayModal(discord.ui.Modal, title="Crear Sorteo"):
 
 
 def build_giveaway_embed(giveaway: Giveaway, host: discord.abc.User) -> discord.Embed:
-    """Construye el embed del sorteo con la información actual."""
     end_ts = int(giveaway.end_time.timestamp())
     embed = discord.Embed(
         title=f"🎉 {giveaway.title}",
@@ -479,7 +534,6 @@ def build_giveaway_embed(giveaway: Giveaway, host: discord.abc.User) -> discord.
 
 
 class GiveawayPreviewView(discord.ui.View):
-    """Vista efímera que solo ve el creador, con botones Publicar/Cancelar/Editar."""
     def __init__(self, giveaway: Giveaway, embed: discord.Embed):
         super().__init__(timeout=600)
         self.giveaway = giveaway
@@ -487,7 +541,6 @@ class GiveawayPreviewView(discord.ui.View):
 
     @discord.ui.button(label="Publicar", style=discord.ButtonStyle.green, emoji="📢")
     async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Deshabilitar botones de la preview
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
@@ -496,11 +549,9 @@ class GiveawayPreviewView(discord.ui.View):
             view=self
         )
 
-        # Enviar el sorteo al canal
         view = GiveawayJoinView()
         message = await interaction.channel.send(embed=self.embed, view=view)
 
-        # Guardar ID del mensaje en el giveaway
         self.giveaway.message_id = message.id
         bot.giveaways[message.id] = self.giveaway
 
@@ -527,9 +578,8 @@ class GiveawayPreviewView(discord.ui.View):
 
 
 class GiveawayJoinView(discord.ui.View):
-    """Vista que se envía al canal con el botón de participar."""
     def __init__(self):
-        super().__init__(timeout=None)  # Sin timeout, vive hasta que termine el sorteo
+        super().__init__(timeout=None)
 
     @discord.ui.button(
         label="Participar",
@@ -538,7 +588,6 @@ class GiveawayJoinView(discord.ui.View):
         custom_id="giveaway_join_button"
     )
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Buscar el giveaway por el ID del mensaje
         message_id = interaction.message.id
         giveaway = bot.giveaways.get(message_id)
 
@@ -556,7 +605,6 @@ class GiveawayJoinView(discord.ui.View):
             )
             return
 
-        # Verificar si ya participó
         if interaction.user.id in giveaway.participants:
             await interaction.response.send_message(
                 "⚠️ Ya estás participando en este sorteo. Solo puedes hacerlo una vez.",
@@ -564,13 +612,10 @@ class GiveawayJoinView(discord.ui.View):
             )
             return
 
-        # Añadir participante
         giveaway.participants.add(interaction.user.id)
 
-        # Actualizar el embed con el nuevo contador
         try:
             embed = interaction.message.embeds[0]
-            # Buscar el campo de participantes y actualizarlo
             for i, field in enumerate(embed.fields):
                 if field.name == "👥 Participantes":
                     embed.set_field_at(i, name="👥 Participantes", value=f"`{len(giveaway.participants)}`", inline=True)
@@ -591,7 +636,10 @@ async def giveaway(interaction: discord.Interaction):
     await interaction.response.send_modal(GiveawayModal())
 
 
-# --- SETUP MANUAL AUTOMOD ---
+# ============================================================
+#                    SETUP AUTOMOD MANUAL
+# ============================================================
+
 @bot.tree.command(name="setup-automod", description="Crea la regla de AutoMod en este servidor")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_automod_cmd(interaction: discord.Interaction):
@@ -600,7 +648,7 @@ async def setup_automod_cmd(interaction: discord.Interaction):
     await interaction.followup.send("Regla de AutoMod configurada (o ya existía).", ephemeral=True)
 
 
-# Manejo de errores
+# --- Manejo de errores ---
 @ban.error
 @warn.error
 @kick.error
