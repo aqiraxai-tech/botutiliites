@@ -1,705 +1,311 @@
-import discord
-from discord import app_commands
-from discord.ext import commands, tasks
-import datetime
 import os
 import random
 import asyncio
-from urllib.parse import urlparse
+import discord
+from discord import app_commands
+from discord.ext import commands
 from dotenv import load_dotenv
 
+# Cargar variables de entorno (para entorno local)
 load_dotenv()
 
+TOKEN = os.getenv("DISCORD_TOKEN")
+
+# --- CONFIGURACIÓN E INTENTOS ---
 intents = discord.Intents.default()
-intents.members = True
 intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Bases de datos simples en memoria
+user_warns = {}
+active_giveaways = {}
 
 
-class AqiraxBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-        self.giveaways = {}
-
-    async def setup_hook(self):
-        await self.tree.sync()
-        print("✅ Comandos de barra sincronizados.")
-        self.check_giveaways.start()
-
-    async def on_ready(self):
-        print(f"🤖 Bot conectado como {self.user} (ID: {self.user.id})")
-
-        await self.change_presence(
-            status=discord.Status.dnd,
-            activity=discord.Activity(
-                type=discord.ActivityType.playing,
-                name="El Futuro Es Hoy."
-            )
-        )
-
-        for guild in self.guilds:
-            await self.setup_automod(guild)
-
-        print(f"ℹ️ Sorteos en memoria: {len(self.giveaways)}")
-
-    async def setup_automod(self, guild: discord.Guild):
-        try:
-            existing_rules = await guild.fetch_automod_rules()
-            if any(rule.name == "Aqirax Link Blocker" for rule in existing_rules):
-                return
-
-            regex_patterns = [
-                r"https?://(www\.)?discord\.gg/\S+",
-                r"https?://(www\.)?discord\.com/\S+",
-                r"https?://(www\.)?youtube\.com/\S+"
-            ]
-
-            await guild.create_automod_rule(
-                name="Aqirax Link Blocker",
-                event_type=discord.AutoModRuleEventType.message_send,
-                trigger=discord.AutoModTrigger(
-                    type=discord.AutoModRuleTriggerType.keyword,
-                    regex_patterns=regex_patterns
-                ),
-                actions=[
-                    discord.AutoModRuleAction(
-                        type=discord.AutoModRuleActionType.block_message,
-                        custom_message="🚫 Enlace bloqueado por AutoMod. El Futuro Es Hoy, pero no esos links."
-                    )
-                ],
-                enabled=True,
-                reason="Bloqueo de enlaces no permitidos (Discord, YouTube)"
-            )
-            print(f"✅ Regla de AutoMod creada en: {guild.name}")
-        except discord.Forbidden:
-            print(f"⚠️ Faltan permisos de AutoMod en: {guild.name}")
-        except Exception as e:
-            print(f"❌ Error creando AutoMod en {guild.name}: {e}")
-
-    @tasks.loop(seconds=10)
-    async def check_giveaways(self):
-        now = datetime.datetime.now(datetime.timezone.utc)
-        finished = []
-        for msg_id, giveaway in list(self.giveaways.items()):
-            if now >= giveaway.end_time and not giveaway.finished:
-                finished.append(msg_id)
-
-        for msg_id in finished:
-            await self.finish_giveaway(msg_id)
-
-    @check_giveaways.before_loop
-    async def before_check(self):
-        await self.wait_until_ready()
-
-    async def finish_giveaway(self, message_id: int):
-        giveaway = self.giveaways.get(message_id)
-        if not giveaway or giveaway.finished:
-            return
-
-        giveaway.finished = True
-
-        try:
-            channel = self.get_channel(giveaway.channel_id)
-            if channel is None:
-                channel = await self.fetch_channel(giveaway.channel_id)
-            message = await channel.fetch_message(message_id)
-        except Exception as e:
-            print(f"❌ No se pudo obtener el mensaje del sorteo {message_id}: {e}")
-            self.giveaways.pop(message_id, None)
-            return
-
-        participants = list(giveaway.participants)
-        if not participants:
-            embed = message.embeds[0] if message.embeds else discord.Embed(title=giveaway.title)
-            embed.color = discord.Color.red()
-            embed.add_field(
-                name="🎉 Resultado",
-                value="❌ Nadie participó en el sorteo.",
-                inline=False
-            )
-            embed.set_footer(text="Sorteo finalizado sin ganador")
-            try:
-                await message.edit(embed=embed, view=None)
-            except Exception:
-                pass
-            self.giveaways.pop(message_id, None)
-            return
-
-        winner_id = random.choice(participants)
-        try:
-            winner = await self.fetch_user(winner_id)
-            winner_mention = winner.mention
-            winner_name = str(winner)
-        except Exception:
-            winner_mention = f"<@{winner_id}>"
-            winner_name = f"Usuario {winner_id}"
-
-        embed = message.embeds[0] if message.embeds else discord.Embed(title=giveaway.title)
-        embed.color = discord.Color.gold()
-        embed.add_field(
-            name="🎉 Ganador",
-            value=f"🏆 {winner_mention}",
-            inline=False
-        )
-        embed.set_footer(text=f"Sorteo finalizado • {len(participants)} participantes")
-
-        try:
-            await message.edit(embed=embed, view=None)
-            await channel.send(
-                f"🎊 ¡Felicidades {winner_mention}! Has ganado el sorteo **{giveaway.title}**. "
-                f"Contacta con un administrador para reclamar tu premio."
-            )
-        except Exception as e:
-            print(f"❌ Error editando mensaje del sorteo: {e}")
-
-        self.giveaways.pop(message_id, None)
-        print(f"🎉 Sorteo finalizado: {giveaway.title} | Ganador: {winner_name}")
-
-
-bot = AqiraxBot()
-
-
-# --- ESTRUCTURA DE DATOS DEL GIVEAWAY ---
-class Giveaway:
-    def __init__(self, title, description, prize, host_id, channel_id, end_time, color=discord.Color.blurple(), image=None):
-        self.title = title
-        self.description = description
-        self.prize = prize
-        self.host_id = host_id
-        self.channel_id = channel_id
-        self.end_time = end_time
-        self.color = color
-        self.image = image
-        self.participants = set()
-        self.finished = False
-        self.message_id = None
-
-
-# --- UTILIDAD: VALIDAR URL ---
-def is_valid_url(url: str) -> bool:
-    if not url:
-        return False
+# --- EVENTO ON_READY (Status, Custom Status, AutoMod) ---
+@bot.event
+async def on_ready():
+    # Status: No molestar + Jugando: El Futuro Es Hoy.
+    activity = discord.Activity(
+        type=discord.ActivityType.playing,
+        name="El Futuro Es Hoy."
+    )
+    await bot.change_presence(status=discord.Status.dnd, activity=activity)
+    
     try:
-        parsed = urlparse(url.strip())
-        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
-    except Exception:
-        return False
+        synced = await bot.tree.sync()
+        print(f"🤖 Bot activo como {bot.user} | {len(synced)} comandos sincronizados.")
+    except Exception as e:
+        print(f"❌ Error sincronizando comandos: {e}")
+
+    # Configurar AutoMod en los servidores donde está presente
+    for guild in bot.guilds:
+        await setup_automod(guild)
 
 
-# ============================================================
-#                       COMANDOS
-# ============================================================
+async def setup_automod(guild: discord.Guild):
+    """Crea la regla de AutoMod para bloquear enlaces restringidos."""
+    try:
+        if not guild.me.guild_permissions.manage_guild:
+            return
 
-@bot.tree.command(name="help", description="Muestra los comandos disponibles")
-async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(title="🤖 Comandos de Aqirax AI", color=discord.Color.blue())
-    embed.add_field(name="/ban", value="Banea a un usuario.", inline=False)
-    embed.add_field(name="/warn", value="Advierte a un usuario.", inline=False)
-    embed.add_field(name="/kick", value="Expulsa a un usuario.", inline=False)
-    embed.add_field(name="/user-info", value="Muestra información de un usuario.", inline=False)
-    embed.add_field(name="/server-info", value="Muestra información del servidor.", inline=False)
-    embed.add_field(name="/channel-info", value="Muestra información de un canal.", inline=False)
-    embed.add_field(name="/banner", value="Muestra el banner de un usuario.", inline=False)
-    embed.add_field(name="/clearwarns", value="Limpia las advertencias de un usuario.", inline=False)
-    embed.add_field(name="/send-embed", value="Abre el editor para crear un embed personalizado.", inline=False)
-    embed.add_field(name="/giveaway", value="Crea un sorteo con UI interactiva.", inline=False)
+        rule_name = "Aqirax Protection - Link Filter"
+        existing_rules = await guild.fetch_automod_rules()
+        
+        if any(rule.name == rule_name for rule in existing_rules):
+            return
+
+        blocked_keywords = [
+            "*discord.gg*",
+            "*discord.com*",
+            "*youtube.com*"
+        ]
+
+        await guild.create_automod_rule(
+            name=rule_name,
+            event_type=discord.AutoModRuleEventType.message_send,
+            trigger_type=discord.AutoModRuleTriggerType.keyword,
+            trigger_metadata=discord.AutoModTriggerMetadata(keyword_filter=blocked_keywords),
+            actions=[discord.AutoModRuleAction(type=discord.AutoModRuleActionType.block_message)],
+            enabled=True,
+            reason="Filtro automático de Aqirax AI"
+        )
+        print(f"✅ AutoMod activo en: {guild.name}")
+    except Exception as e:
+        print(f"⚠️ Error al crear AutoMod en {guild.name}: {e}")
+
+
+# --- COMANDOS GENERALES Y DE MODERACIÓN ---
+
+@bot.tree.command(name="help", description="Lista de comandos del bot.")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🤖 Comandos de Aqirax Bot",
+        description="¡El futuro es hoy, mano! Aquí tienes el panel de control:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="🛡️ Moderación", value="`/ban` `/kick` `/warn` `/clearwarns`", inline=False)
+    embed.add_field(name="ℹ️ Información", value="`/user-info` `/server-info` `/channel-info` `/banner`", inline=False)
+    embed.add_field(name="🎨 Utilidades & Sorteos", value="`/send-embed` `/giveaway`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-warns_db = {}
-
-
-@bot.tree.command(name="ban", description="Banea a un usuario del servidor")
-@app_commands.describe(member="Usuario a banear", reason="Razón del baneo")
+@bot.tree.command(name="ban", description="Banea a un miembro del servidor.")
 @app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "Sin razón especificada"):
-    await member.ban(reason=reason)
-    await interaction.response.send_message(f"🔨 {member.mention} ha sido baneado. Razón: {reason}", ephemeral=True)
+async def ban(interaction: discord.Interaction, usuario: discord.Member, razon: str = "Sin razón especificada"):
+    await usuario.ban(reason=razon)
+    await interaction.response.send_message(f"💥 **{usuario}** fue baneado del servidor. Razón: {razon}")
 
 
-@bot.tree.command(name="warn", description="Advierte a un usuario")
-@app_commands.describe(member="Usuario a advertir", reason="Razón de la advertencia")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "Sin razón especificada"):
-    user_id = member.id
-    if user_id not in warns_db:
-        warns_db[user_id] = []
-    warns_db[user_id].append({
-        "mod": interaction.user.id,
-        "reason": reason,
-        "date": datetime.datetime.now(datetime.timezone.utc)
-    })
-    await interaction.response.send_message(
-        f"⚠️ {member.mention} ha sido advertido. Razón: {reason}\nTotal de warns: {len(warns_db[user_id])}",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="kick", description="Expulsa a un usuario del servidor")
-@app_commands.describe(member="Usuario a expulsar", reason="Razón de la expulsión")
+@bot.tree.command(name="kick", description="Expulsa a un miembro del servidor.")
 @app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Sin razón especificada"):
-    await member.kick(reason=reason)
-    await interaction.response.send_message(f"👢 {member.mention} ha sido expulsado. Razón: {reason}", ephemeral=True)
+async def kick(interaction: discord.Interaction, usuario: discord.Member, razon: str = "Sin razón especificada"):
+    await usuario.kick(reason=razon)
+    await interaction.response.send_message(f"🚪 **{usuario}** fue expulsado. Razón: {razon}")
 
 
-@bot.tree.command(name="user-info", description="Muestra información de un usuario")
-@app_commands.describe(member="Usuario a consultar")
-async def user_info(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    embed = discord.Embed(title=f"Información de {member.name}", color=member.color)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Nombre", value=member.mention, inline=True)
-    embed.add_field(name="ID", value=member.id, inline=True)
-    embed.add_field(name="Creado", value=member.created_at.strftime("%d/%m/%Y"), inline=True)
-    embed.add_field(name="Se unió", value=member.joined_at.strftime("%d/%m/%Y") if member.joined_at else "Desconocido", inline=True)
-    embed.add_field(name="Roles", value=", ".join([r.mention for r in member.roles[1:]]) or "Ninguno", inline=False)
+@bot.tree.command(name="warn", description="Añade una advertencia a un usuario.")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def warn(interaction: discord.Interaction, usuario: discord.Member, razon: str = "Sin razón especificada"):
+    uid = usuario.id
+    user_warns[uid] = user_warns.get(uid, 0) + 1
+    await interaction.response.send_message(f"⚠️ **{usuario.mention}** ha sido advertido. Total de advertencias: **{user_warns[uid]}**. Razón: {razon}")
+
+
+@bot.tree.command(name="clearwarns", description="Limpia el historial de advertencias de un usuario.")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def clearwarns(interaction: discord.Interaction, usuario: discord.Member):
+    user_warns[usuario.id] = 0
+    await interaction.response.send_message(f"🧹 Historial de advertencias reseteado para **{usuario.mention}**.")
+
+
+@bot.tree.command(name="user-info", description="Información detallada de un usuario.")
+async def user_info(interaction: discord.Interaction, usuario: discord.Member = None):
+    target = usuario or interaction.user
+    embed = discord.Embed(title=f"👤 Perfil de {target.name}", color=discord.Color.green())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="ID", value=target.id, inline=True)
+    embed.add_field(name="Ingreso al servidor", value=target.joined_at.strftime("%d/%m/%Y"), inline=True)
+    embed.add_field(name="Cuenta creada", value=target.created_at.strftime("%d/%m/%Y"), inline=True)
+    embed.add_field(name="Warns", value=user_warns.get(target.id, 0), inline=True)
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="server-info", description="Muestra información del servidor")
+@bot.tree.command(name="server-info", description="Información general del servidor.")
 async def server_info(interaction: discord.Interaction):
-    guild = interaction.guild
-    embed = discord.Embed(title=f"Información de {guild.name}", color=discord.Color.blue())
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    embed.add_field(name="ID", value=guild.id, inline=True)
-    embed.add_field(name="Dueño", value=guild.owner.mention if guild.owner else "Desconocido", inline=True)
-    embed.add_field(name="Miembros", value=guild.member_count, inline=True)
-    embed.add_field(name="Creado", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
-    embed.add_field(name="Canales", value=len(guild.channels), inline=True)
+    g = interaction.guild
+    embed = discord.Embed(title=f"🏰 Servidor: {g.name}", color=discord.Color.purple())
+    if g.icon:
+        embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="Miembros", value=g.member_count, inline=True)
+    embed.add_field(name="Creador", value=g.owner, inline=True)
+    embed.add_field(name="Creación", value=g.created_at.strftime("%d/%m/%Y"), inline=True)
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="channel-info", description="Muestra información de un canal")
-@app_commands.describe(channel="Canal a consultar")
-async def channel_info(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    channel = channel or interaction.channel
-    embed = discord.Embed(title=f"Información de {channel.name}", color=discord.Color.green())
-    embed.add_field(name="Tipo", value=str(channel.type), inline=True)
-    embed.add_field(name="ID", value=channel.id, inline=True)
-    embed.add_field(name="Creado", value=channel.created_at.strftime("%d/%m/%Y"), inline=True)
-    embed.add_field(name="Topic", value=channel.topic or "Sin tema", inline=False)
+@bot.tree.command(name="channel-info", description="Información del canal actual.")
+async def channel_info(interaction: discord.Interaction):
+    c = interaction.channel
+    embed = discord.Embed(title=f"📺 Canal: #{c.name}", color=discord.Color.teal())
+    embed.add_field(name="ID", value=c.id, inline=True)
+    embed.add_field(name="Categoría", value=c.category.name if c.category else "Sin categoría", inline=True)
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="banner", description="Muestra el banner de un usuario")
-@app_commands.describe(member="Usuario a consultar")
-async def banner(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    try:
-        user = await bot.fetch_user(member.id)
-        if user.banner:
-            embed = discord.Embed(title=f"Banner de {user.name}", color=discord.Color.purple())
-            embed.set_image(url=user.banner.url)
-            await interaction.response.send_message(embed=embed)
-        else:
-            await interaction.response.send_message(f"{user.mention} no tiene banner configurado.", ephemeral=True)
-    except Exception:
-        await interaction.response.send_message("No se pudo obtener el banner.", ephemeral=True)
-
-
-@bot.tree.command(name="clearwarns", description="Limpia las advertencias de un usuario")
-@app_commands.describe(member="Usuario a limpiar")
-@app_commands.checks.has_permissions(administrator=True)
-async def clearwarns(interaction: discord.Interaction, member: discord.Member):
-    if member.id in warns_db:
-        warns_db[member.id] = []
-        await interaction.response.send_message(f"✅ Las advertencias de {member.mention} han sido eliminadas.", ephemeral=True)
+@bot.tree.command(name="banner", description="Muestra el banner de perfil de un usuario.")
+async def banner(interaction: discord.Interaction, usuario: discord.Member = None):
+    target = usuario or interaction.user
+    user_fetched = await bot.fetch_user(target.id)
+    if user_fetched.banner:
+        embed = discord.Embed(title=f"🖼️ Banner de {target.name}", color=discord.Color.dark_theme())
+        embed.set_image(url=user_fetched.banner.url)
+        await interaction.response.send_message(embed=embed)
     else:
-        await interaction.response.send_message(f"{member.mention} no tiene advertencias registradas.", ephemeral=True)
+        await interaction.response.send_message(f"❌ {target.name} no tiene un banner personalizado.", ephemeral=True)
 
 
-# ============================================================
-#                        SEND EMBED
-# ============================================================
+# --- CREADOR DE EMBEDS CON INTERFAZ ---
 
-class EmbedModal(discord.ui.Modal, title="Editor de Embed"):
-    title_input = discord.ui.TextInput(
-        label="Título",
-        placeholder="Escribe el título del embed...",
-        max_length=256,
-        required=False
-    )
-    desc_input = discord.ui.TextInput(
-        label="Descripción",
-        placeholder="Escribe la descripción...",
-        style=discord.TextStyle.paragraph,
-        max_length=4000,
-        required=False
-    )
-    color_input = discord.ui.TextInput(
-        label="Color (Hex)",
-        placeholder="Ejemplo: #5865F2",
-        max_length=10,
-        required=False,
-        default="#5865F2"
-    )
-    footer_input = discord.ui.TextInput(
-        label="Pie de página",
-        placeholder="Texto del footer...",
-        max_length=2048,
-        required=False
-    )
-    image_input = discord.ui.TextInput(
-        label="URL de Imagen",
-        placeholder="https://ejemplo.com/imagen.png",
-        required=False
-    )
+class EmbedBuilderModal(discord.ui.Modal, title="🛠️ Creador de Embeds"):
+    title_input = discord.ui.TextInput(label="Título", placeholder="Título del mensaje...", required=True)
+    desc_input = discord.ui.TextInput(label="Descripción", style=discord.TextStyle.paragraph, placeholder="Contenido...", required=True)
+    color_input = discord.ui.TextInput(label="Color Hex (ej: #FF0000)", placeholder="#3498db", required=False, max_length=7)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer inmediato para evitar timeout
-        await interaction.response.defer(ephemeral=True)
-
+        hex_val = self.color_input.value or "#3498db"
         try:
-            # Validar URL de imagen
-            image_url = (self.image_input.value or "").strip()
-            invalid_image_warning = None
-            if image_url and not is_valid_url(image_url):
-                invalid_image_warning = image_url
-                image_url = None
+            color = int(hex_val.lstrip('#'), 16)
+        except ValueError:
+            color = 0x3498db
 
-            # Procesar color
-            color_val = discord.Color.blue()
-            if self.color_input.value:
-                try:
-                    if self.color_input.value.startswith("#"):
-                        color_val = discord.Color(int(self.color_input.value[1:], 16))
-                    else:
-                        color_val = getattr(discord.Color, self.color_input.value.lower(), discord.Color.blue)()
-                except Exception:
-                    pass
+        embed = discord.Embed(
+            title=self.title_input.value,
+            description=self.desc_input.value,
+            color=color
+        )
 
-            embed = discord.Embed(
-                title=self.title_input.value or None,
-                description=self.desc_input.value or None,
-                color=color_val,
-                timestamp=datetime.datetime.now(datetime.timezone.utc)
-            )
-            if self.footer_input.value:
-                embed.set_footer(text=self.footer_input.value)
-            if image_url:
-                embed.set_image(url=image_url)
-
-            view = EmbedPreviewView(embed)
-
-            content = "**Preview del Embed** (Solo tú lo ves):"
-            if invalid_image_warning:
-                content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
-
-            await interaction.followup.send(
-                content=content,
-                embed=embed,
-                view=view,
-                ephemeral=True
-            )
-        except Exception as e:
-            print(f"❌ Error en EmbedModal: {e}")
-            try:
-                await interaction.followup.send(f"❌ Error al crear el embed: {e}", ephemeral=True)
-            except Exception:
-                pass
+        view = EmbedPreviewView(embed)
+        await interaction.response.send_message(
+            content="👀 **Vista previa (solo visible para ti):**",
+            embed=embed,
+            view=view,
+            ephemeral=True
+        )
 
 
 class EmbedPreviewView(discord.ui.View):
-    def __init__(self, embed):
-        super().__init__(timeout=300)
+    def __init__(self, embed: discord.Embed):
+        super().__init__(timeout=None)
         self.embed = embed
 
-    @discord.ui.button(label="Enviar", style=discord.ButtonStyle.green, emoji="✅")
-    async def send_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.channel.send(embed=self.embed)
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(content="✅ **Embed enviado al canal.**", view=self)
-            self.stop()
-        except Exception as e:
-            print(f"❌ Error enviando embed: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+    @discord.ui.button(label="🚀 Enviar al canal", style=discord.ButtonStyle.green)
+    async def send_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.channel.send(embed=self.embed)
+        await interaction.response.send_message("✅ ¡Embed publicado con éxito!", ephemeral=True)
 
-    @discord.ui.button(label="Seguir Editando", style=discord.ButtonStyle.blurple, emoji="✏️")
-    async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(EmbedModal())
+    @discord.ui.button(label="✏️ Seguir Editando", style=discord.ButtonStyle.blurple)
+    async def edit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = EmbedBuilderModal()
+        modal.title_input.default = self.embed.title
+        modal.desc_input.default = self.embed.description
+        await interaction.response.send_modal(modal)
 
 
-@bot.tree.command(name="send-embed", description="Abre el editor para crear un embed personalizado")
+@bot.tree.command(name="send-embed", description="Abre el editor visual para construir un Embed.")
 async def send_embed(interaction: discord.Interaction):
-    await interaction.response.send_modal(EmbedModal())
+    await interaction.response.send_modal(EmbedBuilderModal())
 
 
-# ============================================================
-#                    SISTEMA DE GIVEAWAY
-# ============================================================
+# --- SISTEMA DE SORTEOS / GIVEAWAYS ---
 
-class GiveawayModal(discord.ui.Modal, title="Crear Sorteo"):
-    titulo = discord.ui.TextInput(
-        label="Título del sorteo",
-        placeholder="Ej: Sorteo de Nitro",
-        max_length=256,
-        required=True
-    )
-    premio = discord.ui.TextInput(
-        label="Premio",
-        placeholder="Ej: 1 mes de Discord Nitro",
-        max_length=256,
-        required=True
-    )
-    descripcion = discord.ui.TextInput(
-        label="Descripción",
-        placeholder="Describe el sorteo...",
-        style=discord.TextStyle.paragraph,
-        max_length=1024,
-        required=False
-    )
-    duracion = discord.ui.TextInput(
-        label="Duración (en minutos)",
-        placeholder="Ej: 60 (1 hora), 1440 (1 día)",
-        max_length=6,
-        required=True,
-        default="60"
-    )
-    color = discord.ui.TextInput(
-        label="Color del embed (Hex)",
-        placeholder="Ej: #FF5733",
-        max_length=10,
-        required=False,
-        default="#5865F2"
-    )
-    imagen = discord.ui.TextInput(
-        label="URL de imagen (opcional)",
-        placeholder="https://ejemplo.com/imagen.png",
-        required=False
-    )
+class GiveawayModal(discord.ui.Modal, title="🎉 Configurar Giveaway"):
+    prize = discord.ui.TextInput(label="Premio / Título", placeholder="Ej: Discord Nitro 1 Mes", required=True)
+    duration = discord.ui.TextInput(label="Duración en minutos", placeholder="Ej: 10", required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer inmediato para evitar timeout
-        await interaction.response.defer(ephemeral=True)
-
         try:
-            # Validar duración
-            try:
-                minutos = int(self.duracion.value)
-                if minutos < 1 or minutos > 10080:
-                    raise ValueError
-            except ValueError:
-                await interaction.followup.send(
-                    "❌ La duración debe ser un número entre 1 y 10080 minutos (7 días).",
-                    ephemeral=True
-                )
-                return
+            minutes = float(self.duration.value)
+        except ValueError:
+            await interaction.response.send_message("❌ Ingresa una duración numérica válida.", ephemeral=True)
+            return
 
-            # Validar URL de imagen
-            image_url = (self.imagen.value or "").strip()
-            invalid_image_warning = None
-            if image_url and not is_valid_url(image_url):
-                invalid_image_warning = image_url
-                image_url = None
-
-            # Procesar color
-            color_val = discord.Color.blurple()
-            if self.color.value:
-                try:
-                    if self.color.value.startswith("#"):
-                        color_val = discord.Color(int(self.color.value[1:], 16))
-                    else:
-                        color_val = getattr(discord.Color, self.color.value.lower(), discord.Color.blurple)()
-                except Exception:
-                    pass
-
-            end_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutos)
-
-            giveaway = Giveaway(
-                title=self.titulo.value,
-                description=self.descripcion.value or "¡Participa para ganar!",
-                prize=self.premio.value,
-                host_id=interaction.user.id,
-                channel_id=interaction.channel.id,
-                end_time=end_time,
-                color=color_val,
-                image=image_url
-            )
-
-            embed = build_giveaway_embed(giveaway, interaction.user)
-            view = GiveawayPreviewView(giveaway, embed)
-
-            content = "👀 **Preview del Sorteo** (solo tú lo ves). Pulsa **Publicar** para enviarlo al canal."
-            if invalid_image_warning:
-                content += f"\n⚠️ La URL de imagen no es válida y fue ignorada: `{invalid_image_warning[:80]}`"
-
-            await interaction.followup.send(
-                content=content,
-                embed=embed,
-                view=view,
-                ephemeral=True
-            )
-        except Exception as e:
-            print(f"❌ Error en GiveawayModal: {e}")
-            try:
-                await interaction.followup.send(f"❌ Error al crear el sorteo: {e}", ephemeral=True)
-            except Exception:
-                pass
-
-
-def build_giveaway_embed(giveaway: Giveaway, host: discord.abc.User) -> discord.Embed:
-    end_ts = int(giveaway.end_time.timestamp())
-    embed = discord.Embed(
-        title=f"🎉 {giveaway.title}",
-        description=giveaway.description,
-        color=giveaway.color
-    )
-    embed.add_field(name="🎁 Premio", value=giveaway.prize, inline=False)
-    embed.add_field(name="👥 Participantes", value=f"`{len(giveaway.participants)}`", inline=True)
-    embed.add_field(name="⏰ Termina", value=f"<t:{end_ts}:R>", inline=True)
-    embed.add_field(name="🎯 Organizado por", value=host.mention, inline=False)
-    if giveaway.image:
-        embed.set_image(url=giveaway.image)
-    embed.set_footer(text="Pulsa el botón para participar • Solo 1 vez por usuario")
-    embed.timestamp = giveaway.end_time
-    return embed
-
-
-class GiveawayPreviewView(discord.ui.View):
-    def __init__(self, giveaway: Giveaway, embed: discord.Embed):
-        super().__init__(timeout=600)
-        self.giveaway = giveaway
-        self.embed = embed
-
-    @discord.ui.button(label="Publicar", style=discord.ButtonStyle.green, emoji="📢")
-    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            for child in self.children:
-                child.disabled = True
-            await interaction.response.edit_message(
-                content="✅ Publicando sorteo...",
-                embed=self.embed,
-                view=self
-            )
-
-            view = GiveawayJoinView()
-            message = await interaction.channel.send(embed=self.embed, view=view)
-
-            self.giveaway.message_id = message.id
-            bot.giveaways[message.id] = self.giveaway
-
-            await interaction.followup.send(
-                f"🎉 Sorteo publicado correctamente en {interaction.channel.mention}. Termina <t:{int(self.giveaway.end_time.timestamp())}:R>.",
-                ephemeral=True
-            )
-            self.stop()
-        except Exception as e:
-            print(f"❌ Error publicando sorteo: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
-
-    @discord.ui.button(label="Editar", style=discord.ButtonStyle.blurple, emoji="✏️")
-    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(GiveawayModal())
-
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.red, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            content="❌ Sorteo cancelado.",
-            embed=None,
-            view=self
+        embed = discord.Embed(
+            title=f"🎉 ¡SORTEO: {self.prize.value}! 🎉",
+            description=f"¡Haz clic abajo para participar!\n\n⏳ **Duración:** {minutes} minuto(s)\n👤 **Organizador:** {interaction.user.mention}",
+            color=discord.Color.gold()
         )
-        self.stop()
+
+        view = GiveawayView()
+        await interaction.response.send_message("¡Sorteo creado exitosamente!", ephemeral=True)
+        msg = await interaction.channel.send(embed=embed, view=view)
+
+        active_giveaways[msg.id] = {
+            "participants": set(),
+            "prize": self.prize.value
+        }
+
+        await asyncio.sleep(minutes * 60)
+        await end_giveaway(msg, self.prize.value)
 
 
-class GiveawayJoinView(discord.ui.View):
+class GiveawayView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="Participar",
-        style=discord.ButtonStyle.success,
-        emoji="🎉",
-        custom_id="giveaway_join_button"
+    @discord.ui.button(label="🎁 Entrar al Sorteo", style=discord.ButtonStyle.primary, custom_id="claim_giveaway_btn")
+    async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg_id = interaction.message.id
+        if msg_id not in active_giveaways:
+            await interaction.response.send_message("❌ Este sorteo ya ha finalizado.", ephemeral=True)
+            return
+
+        participants = active_giveaways[msg_id]["participants"]
+        user_id = interaction.user.id
+
+        if user_id in participants:
+            await interaction.response.send_message("⚠️ Ya estás participando en este sorteo.", ephemeral=True)
+        else:
+            participants.add(user_id)
+            await interaction.response.send_message("✅ ¡Entraste al sorteo correctamente! 🍀", ephemeral=True)
+
+
+async def end_giveaway(message: discord.Message, prize: str):
+    data = active_giveaways.pop(message.id, None)
+    if not data:
+        return
+
+    participants = list(data["participants"])
+
+    if not participants:
+        embed = discord.Embed(
+            title=f"🎉 SORTEO FINALIZADO: {prize}",
+            description="❌ El tiempo terminó y no hubo participantes.",
+            color=discord.Color.red()
+        )
+        await message.edit(embed=embed, view=None)
+        return
+
+    winner_id = random.choice(participants)
+    winner = message.guild.get_member(winner_id)
+
+    embed = discord.Embed(
+        title=f"🎉 SORTEO FINALIZADO: {prize}",
+        description=f"🏆 **Ganador:** {winner.mention if winner else 'Usuario desvinculado'}\n👥 **Total de Participantes:** {len(participants)}",
+        color=discord.Color.green()
     )
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            message_id = interaction.message.id
-            giveaway = bot.giveaways.get(message_id)
-
-            if giveaway is None:
-                await interaction.response.send_message(
-                    "❌ Este sorteo ya no está activo o no se pudo encontrar.",
-                    ephemeral=True
-                )
-                return
-
-            if giveaway.finished:
-                await interaction.response.send_message(
-                    "❌ Este sorteo ya ha finalizado.",
-                    ephemeral=True
-                )
-                return
-
-            if interaction.user.id in giveaway.participants:
-                await interaction.response.send_message(
-                    "⚠️ Ya estás participando en este sorteo. Solo puedes hacerlo una vez.",
-                    ephemeral=True
-                )
-                return
-
-            giveaway.participants.add(interaction.user.id)
-
-            try:
-                embed = interaction.message.embeds[0]
-                for i, field in enumerate(embed.fields):
-                    if field.name == "👥 Participantes":
-                        embed.set_field_at(i, name="👥 Participantes", value=f"`{len(giveaway.participants)}`", inline=True)
-                        break
-                await interaction.message.edit(embed=embed)
-            except Exception as e:
-                print(f"⚠️ No se pudo actualizar el contador: {e}")
-
-            await interaction.response.send_message(
-                f"✅ ¡Estás participando en el sorteo **{giveaway.title}**! Mucha suerte 🍀",
-                ephemeral=True
-            )
-        except Exception as e:
-            print(f"❌ Error en botón participar: {e}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+    await message.edit(embed=embed, view=None)
+    await message.channel.send(f"🎊 ¡Felicidades {winner.mention}! Has ganado **{prize}** 🔥")
 
 
-@bot.tree.command(name="giveaway", description="Crea un sorteo con UI interactiva")
-@app_commands.checks.has_permissions(manage_guild=True)
+@bot.tree.command(name="giveaway", description="Inicia un nuevo sorteo.")
+@app_commands.checks.has_permissions(manage_events=True)
 async def giveaway(interaction: discord.Interaction):
     await interaction.response.send_modal(GiveawayModal())
 
 
-# ============================================================
-#                    SETUP AUTOMOD MANUAL
-# ============================================================
-
-@bot.tree.command(name="setup-automod", description="Crea la regla de AutoMod en este servidor")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_automod_cmd(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await bot.setup_automod(interaction.guild)
-    await interaction.followup.send("Regla de AutoMod configurada (o ya existía).", ephemeral=True)
-
-
-# --- Manejo de errores ---
-@ban.error
-@warn.error
-@kick.error
-@clearwarns.error
-@setup_automod_cmd.error
-@giveaway.error
-async def permission_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        if not interaction.response.is_done():
-            await interaction.response.send_message("❌ No tienes permisos para usar este comando.", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ No tienes permisos para usar este comando.", ephemeral=True)
-
-
+# --- EJECUCIÓN ---
 if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
-        raise ValueError("❌ Falta la variable de entorno DISCORD_TOKEN")
+        raise ValueError("❌ No se encontró la variable DISCORD_TOKEN.")
     bot.run(TOKEN)
